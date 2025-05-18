@@ -1,0 +1,194 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import json
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import GradientBoostingClassifier
+
+# Load the dataset
+train = pd.read_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/train.csv")
+test = pd.read_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/test.csv")
+
+
+
+# Define target and columns to drop
+drop_cols = ['Dates', 'Descript', 'Resolution', 'Address', 'Id']
+target_col = 'Category'
+
+# Drop unnecessary columns
+X = train.drop(columns=drop_cols + [target_col],errors='ignore')
+y = train[target_col].astype('category')
+
+# Keep ID for submission later
+test_ids = test['Id']
+test = test.drop(columns=drop_cols, errors='ignore')
+
+
+# Drop rare target classes
+class_counts = y.value_counts()
+y = y[~y.isin(class_counts[class_counts < 2].index)]
+X = X.loc[y.index]
+
+# Categorical and numerical split
+low_card_cols = ['PdDistrict', 'DayOfWeek']
+X_cat = pd.get_dummies(X[low_card_cols])
+test_cat = pd.get_dummies(test[low_card_cols])
+
+X_num = X[['X', 'Y']]
+test_num = test[['X', 'Y']]
+
+X_full = pd.concat([X_num, X_cat], axis=1)
+test_full = pd.concat([test_num, test_cat], axis=1)
+
+# Align test and train data
+X_final, test_final = X_full.align(test_full, join='left', axis=1, fill_value=0)
+
+# Encode target and scale features
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Optional: reduce training set size temporarily
+X_final = X_final.sample(n=50000, random_state=42)
+y_encoded = y_encoded[X_final.index]
+
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_final)
+test_scaled = scaler.transform(test_final)
+
+# Split the data into training and validation sets
+X_train, X_val, y_train_enc, y_val_enc = train_test_split(
+    X_scaled, y_encoded, test_size=0.2, stratify=y_encoded, random_state=42
+)
+
+# Recover categorical labels for tree models
+y_train_cat = le.inverse_transform(y_train_enc)
+y_val_cat = le.inverse_transform(y_val_enc)
+
+# Train Models
+dt_model = DecisionTreeClassifier(max_depth=5, random_state=42)
+dt_model.fit(X_train, y_train_cat)
+
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_model.fit(X_train, y_train_cat)
+
+svm_model = LinearSVC(random_state=42, max_iter=5000)
+svm_model.fit(X_train, y_train_enc)
+
+gb_model = GradientBoostingClassifier(n_estimators=50, learning_rate=0.1, max_depth=3, random_state=42)
+gb_model.fit(X_train, y_train_cat)
+
+# Plot class distribution
+plt.figure(figsize=(10, 8))
+pd.Series(le.inverse_transform(y_encoded)).value_counts().plot(kind='barh')
+plt.title("Crime Category Distribution (Filtered)")
+plt.xlabel("Count")
+plt.ylabel("Category")
+plt.tight_layout()
+plt.savefig("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/class_distribution.png")
+plt.close()
+
+#Plot Feature Importances (Random Forest)
+importances = rf_model.feature_importances_
+features = X_final.columns
+forest_importance = pd.Series(importances, index=features)
+
+plt.figure(figsize=(10, 6))
+forest_importance.sort_values(ascending=True).tail(15).plot(kind='barh')
+plt.title("Top 15 Feature Importances (Random Forest)")
+plt.xlabel("Importance")
+plt.tight_layout()
+plt.savefig("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/feature_importance.png")
+plt.close()
+
+# Confusion matrices
+cm_dt = confusion_matrix(y_val_cat, dt_model.predict(X_val), labels=le.classes_)
+plt.figure(figsize=(14, 12))
+sns.heatmap(cm_dt, cmap='Blues', xticklabels=le.classes_, yticklabels=le.classes_)
+plt.title("Confusion Matrix - Decision Tree")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.tight_layout()
+plt.savefig("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/confusion_matrix_dt.png")
+plt.close()
+
+cm_rf = confusion_matrix(y_val_cat, rf_model.predict(X_val), labels=le.classes_)
+plt.figure(figsize=(14, 12))
+sns.heatmap(cm_rf, cmap='Greens', xticklabels=le.classes_, yticklabels=le.classes_)
+plt.title("Confusion Matrix - Random Forest")
+plt.xlabel("Predicted")
+plt.ylabel("Actual")
+plt.tight_layout()
+plt.savefig("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/confusion_matrix_rf.png")
+plt.close()
+gb_acc = accuracy_score(y_val_cat, gb_model.predict(X_val))
+
+# Accuracy comparison
+models = ['Decision Tree', 'Random Forest', 'Linear SVM']
+accuracies = [
+    accuracy_score(y_val_cat, dt_model.predict(X_val)),
+    accuracy_score(y_val_cat, rf_model.predict(X_val)),
+    accuracy_score(y_val_enc, svm_model.predict(X_val))
+]
+models.append('Gradient Boosting')
+accuracies.append(gb_acc)
+
+plt.figure(figsize=(8, 5))
+sns.barplot(x=models, y=accuracies)
+plt.ylabel("Accuracy")
+plt.title("Model Accuracy Comparison")
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.savefig("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/model_accuracy_comparison.png")
+plt.close()
+
+# Save Predictions
+# Decision Tree
+dt_preds = dt_model.predict(test_scaled)
+pd.DataFrame({
+    'Id': test_ids,
+    'Category': dt_preds
+}).to_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/decision_tree_submission.csv", index=False)
+
+# Random Forest
+rf_preds = rf_model.predict(test_scaled)
+pd.DataFrame({
+    'Id': test_ids,
+    'Category': rf_preds
+}).to_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/random_forest_submission.csv", index=False)
+
+# SVM (Linear) - Save predicted classes
+svm_preds = le.inverse_transform(svm_model.predict(test_scaled))
+pd.DataFrame({
+    'Id': test_ids,
+    'Category': svm_preds
+}).to_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/svm_submission.csv", index=False)
+
+gb_preds = gb_model.predict(test_scaled)
+pd.DataFrame({
+    'Id': test_ids,
+    'Category': gb_preds
+}).to_csv("/Users/kevinfaulk/Documents/DDS-8555/Assignment 8/Crime Classification/gradient_boosting_submission.csv", index=False)
+
+
+# Evaluate Models 
+print("Decision Tree Report:")
+print(classification_report(y_val_cat, dt_model.predict(X_val)))
+
+print("\nRandom Forest Report:")
+print(classification_report(y_val_cat, rf_model.predict(X_val)))
+
+print("\nLinear SVM Report:")
+print(classification_report(y_val_enc, svm_model.predict(X_val)))
+
+print("\nGradient Boosting Report:")
+print(classification_report(y_val_cat, gb_model.predict(X_val)))
+
+
+
